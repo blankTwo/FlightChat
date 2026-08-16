@@ -23,7 +23,7 @@
     "allow-update-command-suffix",
     "allow-clear-command-selection",
     "allow-set-split-view",
-    "allow-restart-app",
-    "allow-relay-stream-event"
+    "allow-relay-stream-event",
+    "allow-restart-app"
   ]
 }
