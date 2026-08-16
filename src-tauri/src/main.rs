@@ -479,6 +479,7 @@ const CHATGPT_BRIDGE_SCRIPT: &str = r#"
     // floating controls) without replacing window. Reinstall missing controls.
     window.__flightChat.installFlightModeButton?.();
     window.__flightChat.installPageTrimButton?.();
+    window.__flightChat.installProbeModeButton?.();
     window.__flightChat.installCookieImportButton?.();
     window.__flightChat.installCookieExportButton?.();
     const existingButton = document.getElementById('flight-enter-mode');
@@ -610,6 +611,9 @@ const CHATGPT_BRIDGE_SCRIPT: &str = r#"
       relay({ kind: 'conversation_list', text: JSON.stringify(conversations) });
     }).catch(() => {});
   };
+  // 探针模式：默认启用，阻止网页渲染消息 DOM
+  window.__flightProbeMode = true;
+
   window.fetch = async (...args) => {
     const response = await nativeFetch(...args);
     const input = args[0];
@@ -625,6 +629,17 @@ const CHATGPT_BRIDGE_SCRIPT: &str = r#"
     if (isFastConversationStream || isResumeStream) {
       relay({ kind: 'probe', text: `已捕获回复流：${isResumeStream ? 'conversation/resume' : 'f/conversation'}` });
       void observeResponse(response.clone());
+
+      // 探针模式：阻止网页渲染消息
+      if (window.__flightProbeMode) {
+        relay({ kind: 'probe', text: '探针模式：阻止网页渲染消息 DOM' });
+        // 返回空响应给网页，阻止渲染
+        return new Response('', {
+          status: 204,
+          statusText: 'Intercepted by Flight Probe Mode',
+          headers: new Headers()
+        });
+      }
     }
     return response;
   };
@@ -794,6 +809,7 @@ const CHATGPT_BRIDGE_SCRIPT: &str = r#"
   setInterval(() => {
     if (!document.getElementById('flight-enter-mode')) installFlightModeButton();
     if (!document.getElementById('flight-page-trim')) installPageTrimButton();
+    if (!document.getElementById('flight-probe-mode')) installProbeModeButton();
     if (!document.getElementById('flight-cookie-import')) installCookieImportButton();
     if (!document.getElementById('flight-cookie-export')) installCookieExportButton();
     const nextConversationId = /^\/c\/([^/?#]+)/.exec(location.pathname)?.[1] || '';
@@ -813,10 +829,55 @@ const CHATGPT_BRIDGE_SCRIPT: &str = r#"
     clearTimeout(domCompleteTimer);
     domCompleteTimer = setTimeout(() => relay({ kind: 'complete' }), 900);
   };
+  // 探针模式：隐藏消息容器，但保留必要的交互元素
+  const hideMessageContainer = () => {
+    if (!window.__flightProbeMode) return;
+
+    // 白名单：这些元素必须保持可见
+    const allowedSelectors = [
+      'textarea',
+      '[contenteditable]',
+      'button[data-testid*="send"]',
+      '[role="combobox"]',          // @ 候选
+      '[data-radix-popper-content]', // / 候选浮层
+      '[role="listbox"]',            // 候选列表
+      '[role="option"]',             // 候选选项
+      '#flight-enter-mode',          // Flight 按钮
+      '#flight-page-trim',
+      '#flight-cookie-import',
+      '#flight-cookie-export'
+    ];
+
+    // 隐藏消息节点（包含 user 和 assistant 消息的容器）
+    const messageSelectors = [
+      '[data-message-author-role]',
+      'article[data-testid^="conversation-turn"]',
+      '[data-testid*="conversation-turn"]'
+    ];
+
+    for (const selector of messageSelectors) {
+      const elements = document.querySelectorAll(selector);
+      elements.forEach(el => {
+        // 确保不是候选浮层的一部分
+        if (!el.closest('[role="listbox"]') && !el.closest('[data-radix-popper-content]')) {
+          if (!el.dataset.flightHidden) {
+            el.dataset.flightHidden = 'true';
+            el.style.display = 'none';
+          }
+        }
+      });
+    }
+  };
+
+  // 定期检查并隐藏消息容器
+  setInterval(hideMessageContainer, 500);
+
   const domObserver = new MutationObserver(() => {
     clearTimeout(window.__flightDomDebounce);
     window.__flightDomDebounce = setTimeout(inspectDomReply, 90);
     schedulePageTrim();
+    // 探针模式：每次 DOM 变化时重新隐藏
+    hideMessageContainer();
   });
   domObserver.observe(document.documentElement, { subtree: true, childList: true, characterData: true });
 
@@ -874,6 +935,49 @@ const CHATGPT_BRIDGE_SCRIPT: &str = r#"
       const removed = trimConversationDom(2);
       button.textContent = removed ? `已精简 ${removed} 条` : '无需精简';
       setTimeout(() => { button.textContent = '精简页面'; button.disabled = false; }, 1800);
+    });
+    document.body.appendChild(button);
+  };
+
+  const installProbeModeButton = () => {
+    if (document.getElementById('flight-probe-mode')) return;
+    if (!document.body) {
+      document.addEventListener('DOMContentLoaded', installProbeModeButton, { once: true });
+      return;
+    }
+    const button = document.createElement('button');
+    button.id = 'flight-probe-mode';
+    button.type = 'button';
+    const updateButtonState = () => {
+      if (window.__flightProbeMode) {
+        button.textContent = '✓ 探针模式';
+        button.title = '当前：探针模式（网页不渲染消息）\n点击切换为标准模式';
+        button.style.background = '#34723e';
+        button.style.color = '#fffaf3';
+      } else {
+        button.textContent = '标准模式';
+        button.title = '当前：标准模式（网页正常渲染）\n点击切换为探针模式';
+        button.style.background = '#fffaf3';
+        button.style.color = '#5a351e';
+      }
+    };
+    Object.assign(button.style, {
+      position: 'fixed', right: '22px', bottom: '214px', zIndex: '2147483647',
+      border: '1px solid #5a351e', borderRadius: '999px', padding: '9px 14px', cursor: 'pointer',
+      font: '600 13px system-ui, sans-serif', transition: 'all 0.2s'
+    });
+    updateButtonState();
+    button.addEventListener('click', () => {
+      window.__flightProbeMode = !window.__flightProbeMode;
+      updateButtonState();
+      relay({ kind: 'probe', text: `探针模式已${window.__flightProbeMode ? '启用' : '禁用'}` });
+      // 如果禁用探针模式，恢复被隐藏的消息
+      if (!window.__flightProbeMode) {
+        document.querySelectorAll('[data-flight-hidden]').forEach(el => {
+          el.style.display = '';
+          delete el.dataset.flightHidden;
+        });
+      }
     });
     document.body.appendChild(button);
   };
@@ -1224,7 +1328,7 @@ const CHATGPT_BRIDGE_SCRIPT: &str = r#"
     throw new Error('未找到可用的 ChatGPT 发送按钮');
   };
 
-  window.__flightChat = { send, loadHistory, loadConversationList, openConversation, updateCommandDraft, selectCommandOption, updateCommandSuffix, clearCommandSelection, installFlightModeButton, installPageTrimButton, installCookieImportButton, installCookieExportButton, completeCookieExport, failCookieExport };
+  window.__flightChat = { send, loadHistory, loadConversationList, openConversation, updateCommandDraft, selectCommandOption, updateCommandSuffix, clearCommandSelection, installFlightModeButton, installPageTrimButton, installProbeModeButton, installCookieImportButton, installCookieExportButton, completeCookieExport, failCookieExport };
   installFlightModeButton();
   installPageTrimButton();
   installCookieImportButton();
