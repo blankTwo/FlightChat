@@ -399,7 +399,7 @@ fn clear_command_selection(app: AppHandle, text: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn set_split_view(app: AppHandle, enabled: bool) -> Result<(), String> {
+fn set_split_view(app: AppHandle, enabled: bool, width: u32) -> Result<(), String> {
     let epoch = SPLIT_VIEW_EPOCH.fetch_add(1, Ordering::SeqCst) + 1;
     let main = app.get_webview_window("main").ok_or_else(|| "未找到 Flight 主窗口".to_string())?;
     let chat = app.get_webview_window(CHAT_WINDOW_LABEL).ok_or_else(|| "网页登录窗口尚未创建".to_string())?;
@@ -408,7 +408,7 @@ fn set_split_view(app: AppHandle, enabled: bool) -> Result<(), String> {
         // thread busy; hiding it must not keep the user from returning to the
         // main window or leave this command pending.
         main.show().map_err(|error| error.to_string())?;
-        main.set_size(PhysicalSize::new(1240, 840)).map_err(|error| error.to_string())?;
+        main.set_size(PhysicalSize::new(1400, 900)).map_err(|error| error.to_string())?;
         main.center().map_err(|error| error.to_string())?;
         main.set_focus().map_err(|error| error.to_string())?;
         tauri::async_runtime::spawn(async move {
@@ -424,15 +424,37 @@ fn set_split_view(app: AppHandle, enabled: bool) -> Result<(), String> {
         .ok_or_else(|| "未找到可用显示器".to_string())?;
     let position = monitor.position();
     let size = monitor.size();
-    let left_width = (size.width / 2).max(520);
-    let right_width = size.width.saturating_sub(left_width).max(520);
-    let height = size.height.saturating_sub(36).max(620);
+
+    let window_height = 900_u32;
+
+    // 如果 width 为 0，表示全屏平分
+    let (window_width, total_width, start_x) = if width == 0 {
+        let left_width = (size.width / 2).max(520);
+        (left_width, size.width, position.x)
+    } else {
+        // 固定宽度模式
+        let window_width = width;
+        let total_width = window_width * 2;
+        let start_x = if size.width > total_width {
+            position.x + ((size.width - total_width) / 2) as i32
+        } else {
+            position.x
+        };
+        (window_width, total_width, start_x)
+    };
+
+    let start_y = if size.height > window_height {
+        position.y + ((size.height - window_height) / 2) as i32
+    } else {
+        position.y
+    };
+
     main.show().map_err(|error| error.to_string())?;
-    main.set_position(PhysicalPosition::new(position.x, position.y)).map_err(|error| error.to_string())?;
-    main.set_size(PhysicalSize::new(left_width, height)).map_err(|error| error.to_string())?;
+    main.set_position(PhysicalPosition::new(start_x, start_y)).map_err(|error| error.to_string())?;
+    main.set_size(PhysicalSize::new(window_width, window_height)).map_err(|error| error.to_string())?;
     chat.show().map_err(|error| error.to_string())?;
-    chat.set_position(PhysicalPosition::new(position.x + left_width as i32, position.y)).map_err(|error| error.to_string())?;
-    chat.set_size(PhysicalSize::new(right_width, height)).map_err(|error| error.to_string())?;
+    chat.set_position(PhysicalPosition::new(start_x + window_width as i32, start_y)).map_err(|error| error.to_string())?;
+    chat.set_size(PhysicalSize::new(window_width, window_height)).map_err(|error| error.to_string())?;
     main.set_focus().map_err(|error| error.to_string())?;
     // A delayed hide from the prior close can reach WebView2 after the first
     // show. Reassert visibility while this exact split request is current.
@@ -444,6 +466,19 @@ fn set_split_view(app: AppHandle, enabled: bool) -> Result<(), String> {
             let _ = chat_for_reveal.show();
         }
     });
+    Ok(())
+}
+
+#[tauri::command]
+fn restart_app(app: AppHandle, width: u32, height: u32) -> Result<(), String> {
+    use tauri::Manager;
+
+    let main = app.get_webview_window("main").ok_or_else(|| "未找到主窗口".to_string())?;
+
+    // 设置新的窗口大小
+    main.set_size(PhysicalSize::new(width, height)).map_err(|error| error.to_string())?;
+    main.center().map_err(|error| error.to_string())?;
+
     Ok(())
 }
 
@@ -462,6 +497,7 @@ fn main() {
             update_command_suffix,
             clear_command_selection,
             set_split_view,
+            restart_app,
             relay_stream_event,
             import_cookies,
             export_cookies
@@ -612,7 +648,9 @@ const CHATGPT_BRIDGE_SCRIPT: &str = r#"
     }).catch(() => {});
   };
   // 探针模式：默认启用，阻止网页渲染消息 DOM
-  window.__flightProbeMode = true;
+  // 从 sessionStorage 恢复探针模式状态（刷新后保持）
+  const savedProbeMode = sessionStorage.getItem('__flightProbeMode');
+  window.__flightProbeMode = savedProbeMode !== null ? savedProbeMode === 'true' : true;
 
   window.fetch = async (...args) => {
     const response = await nativeFetch(...args);
@@ -628,18 +666,59 @@ const CHATGPT_BRIDGE_SCRIPT: &str = r#"
     if (isConversationList && response.ok) cacheConversationListResponse(response.clone());
     if (isFastConversationStream || isResumeStream) {
       relay({ kind: 'probe', text: `已捕获回复流：${isResumeStream ? 'conversation/resume' : 'f/conversation'}` });
-      void observeResponse(response.clone());
 
-      // 探针模式：阻止网页渲染消息
+      // 探针模式：手动 tee 流，一份给 Flight，一份给网页（空）
       if (window.__flightProbeMode) {
-        relay({ kind: 'probe', text: '探针模式：阻止网页渲染消息 DOM' });
-        // 返回空响应给网页，阻止渲染
-        return new Response('', {
-          status: 204,
-          statusText: 'Intercepted by Flight Probe Mode',
-          headers: new Headers()
+        relay({ kind: 'probe', text: '探针模式：拦截流到 Flight' });
+
+        if (!response.body) {
+          relay({ kind: 'error', error: '响应流为空' });
+          return response;
+        }
+
+        // 使用 tee 分流：一份给 Flight 解析，一份丢弃
+        const [flightStream, discardStream] = response.body.tee();
+
+        // Flight 流：异步读取并解析
+        const flightResponse = new Response(flightStream, {
+          status: response.status,
+          statusText: response.statusText,
+          headers: response.headers
+        });
+        void observeResponse(flightResponse);
+
+        // 网页流：返回空的 SSE 流
+        const emptyStream = new ReadableStream({
+          async start(controller) {
+            // 消费掉原始流（防止连接挂起），但不发送给网页
+            const reader = discardStream.getReader();
+            try {
+              while (true) {
+                const { done } = await reader.read();
+                if (done) break;
+              }
+            } catch (e) {
+              // 忽略错误
+            }
+            // 发送空的 done 事件
+            controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+            controller.close();
+          }
+        });
+
+        return new Response(emptyStream, {
+          status: 200,
+          statusText: 'OK',
+          headers: new Headers({
+            'Content-Type': 'text/event-stream',
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive'
+          })
         });
       }
+
+      // 标准模式：正常传递响应，同时观察
+      void observeResponse(response.clone());
     }
     return response;
   };
@@ -653,7 +732,10 @@ const CHATGPT_BRIDGE_SCRIPT: &str = r#"
   ];
   const latestAssistantText = () => {
     for (const selector of assistantSelectors) {
-      const nodes = [...document.querySelectorAll(selector)].filter((node) => node.offsetParent !== null);
+      const nodes = [...document.querySelectorAll(selector)]
+        .filter((node) => node.offsetParent !== null)
+        // 排除 @ 和 / 候选浮层中的内容
+        .filter((node) => !node.closest('[role="listbox"]') && !node.closest('[data-radix-popper-content]') && !node.closest('[role="dialog"]') && !node.closest('[role="menu"]'));
       const last = nodes.at(-1);
       const text = last?.innerText?.trim();
       if (text) return text;
@@ -675,6 +757,8 @@ const CHATGPT_BRIDGE_SCRIPT: &str = r#"
 
   const historyFromDom = () => [...document.querySelectorAll('[data-message-author-role="user"], [data-message-author-role="assistant"]')]
     .filter((node) => node.offsetParent !== null)
+    // 排除 @ 和 / 候选浮层中的内容（不是真正的消息）
+    .filter((node) => !node.closest('[role="listbox"]') && !node.closest('[data-radix-popper-content]') && !node.closest('[role="dialog"]') && !node.closest('[role="menu"]'))
     .map((node) => ({ role: node.getAttribute('data-message-author-role'), text: asMarkdownFromDom(node) }))
     .filter((message) => message.text);
 
@@ -829,55 +913,21 @@ const CHATGPT_BRIDGE_SCRIPT: &str = r#"
     clearTimeout(domCompleteTimer);
     domCompleteTimer = setTimeout(() => relay({ kind: 'complete' }), 900);
   };
-  // 探针模式：隐藏消息容器，但保留必要的交互元素
+  // 探针模式：只拦截流，不隐藏 DOM
+  // 旧消息会自然留在网页上，但新消息不会渲染
   const hideMessageContainer = () => {
-    if (!window.__flightProbeMode) return;
-
-    // 白名单：这些元素必须保持可见
-    const allowedSelectors = [
-      'textarea',
-      '[contenteditable]',
-      'button[data-testid*="send"]',
-      '[role="combobox"]',          // @ 候选
-      '[data-radix-popper-content]', // / 候选浮层
-      '[role="listbox"]',            // 候选列表
-      '[role="option"]',             // 候选选项
-      '#flight-enter-mode',          // Flight 按钮
-      '#flight-page-trim',
-      '#flight-cookie-import',
-      '#flight-cookie-export'
-    ];
-
-    // 隐藏消息节点（包含 user 和 assistant 消息的容器）
-    const messageSelectors = [
-      '[data-message-author-role]',
-      'article[data-testid^="conversation-turn"]',
-      '[data-testid*="conversation-turn"]'
-    ];
-
-    for (const selector of messageSelectors) {
-      const elements = document.querySelectorAll(selector);
-      elements.forEach(el => {
-        // 确保不是候选浮层的一部分
-        if (!el.closest('[role="listbox"]') && !el.closest('[data-radix-popper-content]')) {
-          if (!el.dataset.flightHidden) {
-            el.dataset.flightHidden = 'true';
-            el.style.display = 'none';
-          }
-        }
-      });
-    }
+    // 探针模式不再主动隐藏 DOM
+    // 只通过流拦截阻止新消息渲染
   };
 
-  // 定期检查并隐藏消息容器
-  setInterval(hideMessageContainer, 500);
+  // 不再定期执行 DOM 隐藏
+  // setInterval(hideMessageContainer, 500);
 
   const domObserver = new MutationObserver(() => {
     clearTimeout(window.__flightDomDebounce);
     window.__flightDomDebounce = setTimeout(inspectDomReply, 90);
     schedulePageTrim();
-    // 探针模式：每次 DOM 变化时重新隐藏
-    hideMessageContainer();
+    // 探针模式不再隐藏 DOM
   });
   domObserver.observe(document.documentElement, { subtree: true, childList: true, characterData: true });
 
@@ -969,15 +1019,11 @@ const CHATGPT_BRIDGE_SCRIPT: &str = r#"
     updateButtonState();
     button.addEventListener('click', () => {
       window.__flightProbeMode = !window.__flightProbeMode;
+      // 保存状态到 sessionStorage（刷新后保持）
+      sessionStorage.setItem('__flightProbeMode', String(window.__flightProbeMode));
       updateButtonState();
       relay({ kind: 'probe', text: `探针模式已${window.__flightProbeMode ? '启用' : '禁用'}` });
-      // 如果禁用探针模式，恢复被隐藏的消息
-      if (!window.__flightProbeMode) {
-        document.querySelectorAll('[data-flight-hidden]').forEach(el => {
-          el.style.display = '';
-          delete el.dataset.flightHidden;
-        });
-      }
+      // 探针模式切换不再需要恢复 DOM（因为我们不隐藏了）
     });
     document.body.appendChild(button);
   };
@@ -1331,6 +1377,7 @@ const CHATGPT_BRIDGE_SCRIPT: &str = r#"
   window.__flightChat = { send, loadHistory, loadConversationList, openConversation, updateCommandDraft, selectCommandOption, updateCommandSuffix, clearCommandSelection, installFlightModeButton, installPageTrimButton, installProbeModeButton, installCookieImportButton, installCookieExportButton, completeCookieExport, failCookieExport };
   installFlightModeButton();
   installPageTrimButton();
+  installProbeModeButton();
   installCookieImportButton();
   installCookieExportButton();
   const currentConversationId = /^\/c\/([^/?#]+)/.exec(location.pathname)?.[1];

@@ -34,9 +34,35 @@ const CHAT_WINDOW_LABEL = 'chatgpt-session'
 const QUICK_FLIGHT_WINDOW_LABEL = 'flight-quick'
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024
 const HISTORY_LIMITS = [2, 5, 10, 20, 50] as const
+const SPLIT_WIDTHS = [
+  { label: '固定宽度 (1000px)', value: 1000 },
+  { label: '中等宽度 (1200px)', value: 1200 },
+  { label: '全屏平分', value: 0 }
+] as const
+const WINDOW_SIZES = [
+  { label: '标准 (1400×900)', width: 1400, height: 900 },
+  { label: '紧凑 (1280×768)', width: 1280, height: 768 },
+  { label: '宽屏 (1600×900)', width: 1600, height: 900 },
+  { label: '全高清 (1920×1080)', width: 1920, height: 1080 }
+] as const
+
 const initialHistoryLimit = (() => {
   const saved = Number(window.localStorage.getItem('flight-history-limit'))
   return HISTORY_LIMITS.includes(saved as typeof HISTORY_LIMITS[number]) ? saved : 2
+})()
+
+const initialSplitWidth = (() => {
+  const saved = Number(window.localStorage.getItem('flight-split-width'))
+  return saved || 1000
+})()
+
+const initialWindowSize = (() => {
+  const saved = window.localStorage.getItem('flight-window-size')
+  if (saved) {
+    const parsed = JSON.parse(saved)
+    return { width: parsed.width || 1400, height: parsed.height || 900 }
+  }
+  return { width: 1400, height: 900 }
 })()
 
 const readImage = (file: File) => new Promise<ImageAttachment>((resolve, reject) => {
@@ -94,12 +120,15 @@ export default function App() {
   const [conversationId, setConversationId] = useState<string>()
   const [title, setTitle] = useState('未命名会话')
   const [historyLimit, setHistoryLimit] = useState<number>(initialHistoryLimit)
+  const [splitWidth, setSplitWidth] = useState<number>(initialSplitWidth)
+  const [windowSize, setWindowSize] = useState(initialWindowSize)
   const [conversationList, setConversationList] = useState<ConversationSummary[]>([])
   const [historyDrawerOpen, setHistoryDrawerOpen] = useState(false)
   const [historyQuery, setHistoryQuery] = useState('')
   const [historyLoading, setHistoryLoading] = useState(false)
   const [conversationSwitching, setConversationSwitching] = useState(false)
   const transcriptRef = useRef<HTMLDivElement>(null)
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
   const pendingConversationRef = useRef<string>()
   const newConversationPendingRef = useRef(false)
   const autoEnterRef = useRef(false)
@@ -107,6 +136,26 @@ export default function App() {
   useEffect(() => {
     window.localStorage.setItem('flight-history-limit', String(historyLimit))
   }, [historyLimit])
+
+  useEffect(() => {
+    window.localStorage.setItem('flight-split-width', String(splitWidth))
+  }, [splitWidth])
+
+  useEffect(() => {
+    window.localStorage.setItem('flight-window-size', JSON.stringify(windowSize))
+  }, [windowSize])
+
+  useEffect(() => {
+    const textarea = textareaRef.current
+    if (!textarea) return
+
+    const adjustHeight = () => {
+      textarea.style.height = 'auto'
+      textarea.style.height = `${textarea.scrollHeight}px`
+    }
+
+    adjustHeight()
+  }, [draft])
 
   useEffect(() => {
     const stop = listen<StreamEvent>('flight://stream', ({ payload }) => {
@@ -324,7 +373,6 @@ export default function App() {
       }
       setMode('browser')
       setStatus('网页登录窗口已打开')
-      void showQuickFlightControl()
       // ChatGPT can redirect through several documents before its final page.
       // Retry injection so the controls land on that final authenticated document.
       for (const delay of [700, 1800, 3600, 6500]) {
@@ -417,6 +465,33 @@ export default function App() {
       setStatus('飞行模式已连接网页通道')
     } catch (error) {
       setStatus(`请先完成网页登录：${String(error)}`)
+    }
+  }
+
+  async function exitFlightMode() {
+    try {
+      if (splitView) {
+        await invoke('set_split_view', { enabled: false, width: splitWidth })
+        setSplitView(false)
+      }
+      // 不调用后端的 exit_flight_mode，因为它会打开网页
+      // 只在前端切换到 browser 模式即可
+      setMode('browser')
+      setPickingHistory(false)
+      setMessages([])
+      setConversationId(undefined)
+      setTitle('未命名会话')
+      setStatus('可调整设置后重新进入')
+    } catch (error) {
+      setStatus(`无法退出飞行模式：${String(error)}`)
+    }
+  }
+
+  async function restartApp() {
+    try {
+      await invoke('restart_app', { width: windowSize.width, height: windowSize.height })
+    } catch (error) {
+      setStatus(`重启失败：${String(error)}`)
     }
   }
 
@@ -597,7 +672,7 @@ export default function App() {
     setSplitView(enabled)
     setStatus(enabled ? '正在开启分屏预览…' : '正在收起网页，返回飞行模式…')
     try {
-      await invoke('set_split_view', { enabled })
+      await invoke('set_split_view', { enabled, width: splitWidth })
       setStatus(enabled ? '分屏预览已开启：左侧 Flight，右侧网页' : '已返回飞行模式')
     } catch (error) {
       setSplitView(previous)
@@ -623,18 +698,22 @@ export default function App() {
   return (
     <main className="app-shell">
       <header className="topbar">
-        <div className="wordmark" aria-label="Flight Chat">
-          <span className="wordmark-mark">F</span>
-          <span>Flight</span>
+        <div className="topbar-left">
+          <div className="wordmark" aria-label="Flight Chat">
+            <span className="wordmark-mark">F</span>
+            <span>Flight</span>
+          </div>
+          <span className="topbar-status">{sending ? '正在接收网页回复' : status}</span>
+          <span className={`connection ${connected ? 'is-live' : ''}`}><i />{connected ? '网页通道在线' : '未连接'}</span>
         </div>
         <div className="topbar-center">
           <span className="eyebrow">当前会话</span>
           <strong>{title}</strong>
         </div>
         <div className="topbar-actions">
-          <span className={`connection ${connected ? 'is-live' : ''}`}><i />{connected ? '网页通道在线' : '未连接'}</span>
           {mode === 'flight' ? (
             <>
+              <button className="button quiet" onClick={() => void createConversation()}>新会话</button>
               <button className={`button quiet ${splitView ? 'is-active' : ''}`} onClick={() => void toggleSplitView()}>{splitView ? '关闭分屏' : '分屏预览'}</button>
               <button className={`button quiet ${historyDrawerOpen ? 'is-active' : ''}`} onClick={() => void openConversationList()}>会话列表</button>
             </>
@@ -646,22 +725,58 @@ export default function App() {
 
       {mode === 'browser' ? (
         <section className="landing" aria-labelledby="landing-title">
-          <div className="landing-rule" />
-          <p className="eyebrow">Flight mode / 01</p>
-          <h1 id="landing-title">{pickingHistory ? <>从历史里回来，<br />继续专注对话。</> : <>把网页留在后台，<br />把注意力留给对话。</>}</h1>
-          <p className="landing-copy">{pickingHistory ? '网页窗口已显示。请在 ChatGPT 左侧历史列表选择会话；选择完成后，点击“继续飞行”隐藏网页。' : '先在独立网页窗口登录 ChatGPT。验证完成后，返回这里进入飞行模式；后续发送与流式回复仍由真实网页会话处理。'}</p>
+          <div>
+            <p className="eyebrow">Flight mode / 01</p>
+            <h1 id="landing-title">{pickingHistory ? '从历史里回来，继续专注对话' : '把网页留在后台，把注意力留给对话'}</h1>
+            <p className="landing-copy">{pickingHistory ? '网页窗口已显示。请在 ChatGPT 左侧历史列表选择会话；选择完成后，点击"继续飞行"隐藏网页。' : '先在独立网页窗口登录 ChatGPT。验证完成后，返回这里进入飞行模式；后续发送与流式回复仍由真实网页会话处理。'}</p>
+          </div>
           <div className="landing-actions">
             <button className="button primary" onClick={() => void openLogin()}>{pickingHistory ? '回到网页会话' : '打开网页登录'}</button>
             <button className="text-button" onClick={() => void enterFlightMode()}>{pickingHistory ? '继续飞行' : '进入飞行模式'} <span>↗</span></button>
           </div>
-          <label className="history-limit">
-            <span>历史回显</span>
-            <select value={historyLimit} onChange={(event) => setHistoryLimit(Number(event.target.value))}>
-              {HISTORY_LIMITS.map((limit) => <option key={limit} value={limit}>最新 {limit} 条消息</option>)}
-            </select>
-            <small>设置会自动保存，并在下次进入飞行模式时生效。</small>
-          </label>
-          <p className="status-line" role="status"><span>待机</span>{status}</p>
+          <div className="landing-settings">
+            <div className="setting-item">
+              <span className="setting-label">历史回显</span>
+              <div className="setting-control">
+                <select value={historyLimit} onChange={(event) => setHistoryLimit(Number(event.target.value))}>
+                  {HISTORY_LIMITS.map((limit) => <option key={limit} value={limit}>最新 {limit} 条消息</option>)}
+                </select>
+                <p className="setting-hint">设置会自动保存，并在下次进入飞行模式时生效</p>
+              </div>
+            </div>
+            <div className="setting-item">
+              <span className="setting-label">分屏宽度</span>
+              <div className="setting-control">
+                <select value={splitWidth} onChange={(event) => setSplitWidth(Number(event.target.value))}>
+                  {SPLIT_WIDTHS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                </select>
+                <p className="setting-hint">设置点击"分屏预览"时每个窗口的宽度</p>
+              </div>
+            </div>
+            <div className="setting-item">
+              <span className="setting-label">窗口大小</span>
+              <div className="setting-control">
+                <div className="setting-options">
+                  {WINDOW_SIZES.map((size) => (
+                    <label key={`${size.width}x${size.height}`} className="setting-option">
+                      <input
+                        type="radio"
+                        name="windowSize"
+                        checked={windowSize.width === size.width && windowSize.height === size.height}
+                        onChange={() => setWindowSize({ width: size.width, height: size.height })}
+                      />
+                      <span>{size.label}</span>
+                    </label>
+                  ))}
+                </div>
+                <div className="setting-action">
+                  <button className="button quiet" onClick={() => void restartApp()}>重启应用生效</button>
+                </div>
+                <p className="setting-hint">修改窗口大小后需要重启应用才能生效</p>
+              </div>
+            </div>
+          </div>
+          <div className="status-line"><span>待机</span><span>{status}</span></div>
         </section>
       ) : (
         <section className="conversation" aria-label="飞行模式对话">
@@ -679,10 +794,6 @@ export default function App() {
             </aside>
           )}
           <div className="thread">
-            <div className="thread-head">
-              <button className="thread-new" onClick={() => void createConversation()}>新会话</button>
-              <span>{sending ? '正在接收网页回复' : status}</span>
-            </div>
             <div className={`transcript ${messages.length === 0 ? 'is-empty' : ''}`} ref={transcriptRef}>
               {messages.length === 0 ? (
                 <div className="empty-state">
@@ -711,21 +822,29 @@ export default function App() {
                   <button type="button" onClick={() => void clearSelectedCommand()} aria-label="移除命令标签">×</button>
                 </div>
               )}
-              <textarea
-                aria-label="输入消息"
-                value={draft}
-                onChange={(event) => setDraft(event.target.value)}
-                onPaste={(event) => void pasteImage(event)}
-                onKeyDown={(event) => onComposerKeyDown(event, () => void send(event as unknown as FormEvent))}
-                placeholder="写下你想说的，或直接粘贴图片…"
-                rows={1}
-                disabled={sending || conversationSwitching}
-              />
-              <button className="send" type="submit" disabled={!canSend} aria-label="发送消息">↑</button>
+              <div className="composer-input-wrapper">
+                <textarea
+                  ref={textareaRef}
+                  aria-label="输入消息"
+                  value={draft}
+                  onChange={(event) => setDraft(event.target.value)}
+                  onPaste={(event) => void pasteImage(event)}
+                  onKeyDown={(event) => onComposerKeyDown(event, () => void send(event as unknown as FormEvent))}
+                  placeholder="写下你想说的，或直接粘贴图片…"
+                  rows={1}
+                  disabled={sending || conversationSwitching}
+                />
+                <button className="send" type="submit" disabled={!canSend} aria-label="发送消息">↑</button>
+              </div>
               <p>Enter 发送　·　Shift + Enter 换行</p>
             </form>
           </div>
         </section>
+      )}
+      {mode === 'flight' && (
+        <button className="floating-settings-button" onClick={() => void exitFlightMode()} aria-label="返回设置页" title="返回设置页">
+          ⚙
+        </button>
       )}
     </main>
   )
