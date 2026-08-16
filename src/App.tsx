@@ -454,8 +454,17 @@ export default function App() {
   async function enterFlightMode() {
     try {
       if (splitView) {
-        await invoke('set_split_view', { enabled: false })
+        await invoke('set_split_view', { enabled: false, width: splitWidth })
         setSplitView(false)
+      }
+      // 检查网页窗口是否存在
+      const existing = await WebviewWindow.getByLabel(CHAT_WINDOW_LABEL)
+      if (!existing) {
+        // 网页窗口不存在，需要重新打开
+        setStatus('网页窗口已关闭，正在重新打开...')
+        await openLogin()
+        setStatus('请在网页窗口登录后，再次点击"进入飞行模式"')
+        return
       }
       await invoke('enter_flight_mode', { historyLimit })
       await hideQuickFlightControl()
