@@ -9,6 +9,8 @@
     "core:window:allow-show",
     "core:window:allow-hide",
     "core:window:allow-set-focus",
+    "core:window:allow-set-size",
+    "core:window:allow-center",
     "allow-enter-flight-mode",
     "allow-prepare-web-bridge",
     "allow-exit-flight-mode",
@@ -21,6 +23,7 @@
     "allow-update-command-suffix",
     "allow-clear-command-selection",
     "allow-set-split-view",
+    "allow-restart-app",
     "allow-relay-stream-event"
   ]
 }
