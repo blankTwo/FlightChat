@@ -1,0 +1,21 @@
+[package]
+name = "flight-chat"
+version = "0.1.1"
+description = "A lightweight ChatGPT flight-mode desktop shell"
+authors = ["you"]
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]
+
+[dependencies]
+cookie = "0.18.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = [] }
+url = "2"
+webview2-com = "0.38.2"
+windows-core = "0.61.2"

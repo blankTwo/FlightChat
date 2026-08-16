@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-select-conversation"
+description = "Enables the select_conversation command without any pre-configured scope."
+commands.allow = ["select_conversation"]
+
+[[permission]]
+identifier = "deny-select-conversation"
+description = "Denies the select_conversation command without any pre-configured scope."
+commands.deny = ["select_conversation"]

@@ -1,0 +1,15 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "chatgpt-bridge",
+  "description": "Allows the authenticated ChatGPT page to relay conversation events to Flight Chat only.",
+  "windows": ["chatgpt-session"],
+  "remote": {
+    "urls": ["https://chatgpt.com/*", "https://auth.openai.com/*"]
+  },
+  "permissions": [
+    "core:default",
+    "allow-relay-stream-event",
+    "allow-import-cookies",
+    "allow-export-cookies"
+  ]
+}

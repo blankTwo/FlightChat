@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-enter-flight-mode"
+description = "Enables the enter_flight_mode command without any pre-configured scope."
+commands.allow = ["enter_flight_mode"]
+
+[[permission]]
+identifier = "deny-enter-flight-mode"
+description = "Denies the enter_flight_mode command without any pre-configured scope."
+commands.deny = ["enter_flight_mode"]

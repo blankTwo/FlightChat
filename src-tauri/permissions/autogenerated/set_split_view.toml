@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-split-view"
+description = "Enables the set_split_view command without any pre-configured scope."
+commands.allow = ["set_split_view"]
+
+[[permission]]
+identifier = "deny-set-split-view"
+description = "Denies the set_split_view command without any pre-configured scope."
+commands.deny = ["set_split_view"]

@@ -1,0 +1,39 @@
+# 日志文件
+*.log
+tauri-dev.stdout.log
+tauri-dev.stderr.log
+tauri-restart.stdout.log
+tauri-restart.stderr.log
+
+# 抓包数据（包含敏感信息）
+*_20*.json
+http_requests_*.json
+websocket_*.json
+localstorage_*.json
+window_snapshot_*.json
+
+# 依赖
+node_modules/
+target/
+
+# 构建产物
+dist/
+src-tauri/target/
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Tauri
+src-tauri/gen/
+
+# 环境变量（如果有）
+.env
+.env.local

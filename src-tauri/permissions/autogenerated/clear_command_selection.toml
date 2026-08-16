@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-clear-command-selection"
+description = "Enables the clear_command_selection command without any pre-configured scope."
+commands.allow = ["clear_command_selection"]
+
+[[permission]]
+identifier = "deny-clear-command-selection"
+description = "Denies the clear_command_selection command without any pre-configured scope."
+commands.deny = ["clear_command_selection"]
