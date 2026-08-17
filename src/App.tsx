@@ -12,9 +12,15 @@ type Message = {
   id: string
   role: Role
   text: string
+  kind?: 'text' | 'thinking' | 'tool'
   streaming?: boolean
   failed?: boolean
   image?: ImageAttachment
+  toolName?: string
+  command?: string
+  result?: string
+  card?: Record<string, unknown>
+  toolStatus?: 'running' | 'completed'
 }
 
 type ImageAttachment = { name: string, dataUrl: string }
@@ -22,11 +28,16 @@ type ConversationSummary = { id: string, title: string, updatedAt?: number }
 type AccountSummary = { name: string, plan: string }
 
 type StreamEvent = {
-  kind: 'bridge_ready' | 'account' | 'probe' | 'session_ready' | 'session_login_required' | 'enter_flight' | 'flight_active' | 'assistant_start' | 'conversation' | 'conversation_loading' | 'conversation_list' | 'conversation_list_error' | 'history' | 'command_suggestions' | 'delta' | 'complete' | 'title' | 'error'
+  kind: 'bridge_ready' | 'account' | 'probe' | 'session_ready' | 'session_login_required' | 'enter_flight' | 'flight_active' | 'assistant_start' | 'thinking' | 'thinking_summary' | 'tool_start' | 'tool_result' | 'tool_delta' | 'conversation' | 'conversation_loading' | 'conversation_list' | 'conversation_list_error' | 'history' | 'command_suggestions' | 'delta' | 'complete' | 'title' | 'error'
   text?: string
   conversationId?: string
   title?: string
   error?: string
+  messageId?: string
+  toolName?: string
+  command?: string
+  result?: string
+  card?: Record<string, unknown> | null
   messages?: Array<{ role: Role, text: string }>
 }
 
@@ -80,6 +91,11 @@ const mergeDelta = (current: string, incoming: string) => {
   return current + incoming
 }
 
+const isThinkingText = (text: string) => {
+  const compact = String(text || '').replace(/[\s.…]/g, '').toLowerCase()
+  return /^(?:正在思考|思考中|正在思考中|thinking|thinkingfor\d+s?)$/.test(compact)
+}
+
 function CodeBlock({ className, children, ...props }: ComponentPropsWithoutRef<'code'>) {
   const [copied, setCopied] = useState(false)
   const language = /language-([\w+-]+)/.exec(className ?? '')?.[1]
@@ -103,6 +119,35 @@ function CodeBlock({ className, children, ...props }: ComponentPropsWithoutRef<'
 
 function MarkdownContent({ value }: { value: string }) {
   return <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ code: CodeBlock }}>{value}</ReactMarkdown>
+}
+
+function ToolMessage({ message }: { message: Message }) {
+  const [expanded, setExpanded] = useState(false)
+  const card = message.card ?? {}
+  const summary = typeof card.summary === 'string'
+    ? card.summary
+    : typeof card.title === 'string' ? card.title : '工具结果'
+  const cardPayload = card.payload && typeof card.payload === 'object' ? card.payload as Record<string, unknown> : undefined
+  const output = message.result || (typeof cardPayload?.content === 'string' ? cardPayload.content : '')
+
+  return (
+    <div className={`tool-message ${message.toolStatus === 'running' ? 'is-running' : ''}`}>
+      <button type="button" className="tool-message-head" onClick={() => setExpanded((value) => !value)} aria-expanded={expanded}>
+        <span className="tool-message-icon">{message.toolStatus === 'running' ? '⋯' : '⌘'}</span>
+        <span className="tool-message-title">{message.toolName || '已调用工具'}</span>
+        <span className="tool-message-state">{message.toolStatus === 'running' ? '运行中' : '已完成'}</span>
+        <span className="tool-message-chevron">{expanded ? '⌃' : '⌄'}</span>
+      </button>
+      {expanded && (
+        <div className="tool-message-body">
+          {message.command && <pre className="tool-command">{message.command}</pre>}
+          {summary && <div className="tool-card-summary">{summary}</div>}
+          {output && <pre className="tool-result">{output}</pre>}
+          {!message.command && !summary && !output && <div className="tool-empty">暂无工具结果</div>}
+        </div>
+      )}
+    </div>
+  )
 }
 
 export default function App() {
@@ -304,13 +349,91 @@ export default function App() {
         return
       }
 
+      if (payload.kind === 'thinking') {
+        const thinkingText = payload.text?.trim() || '正在思考'
+        setMessages((current) => {
+          const last = current.at(-1)
+          if (last?.role === 'assistant' && last.streaming) {
+            return [...current.slice(0, -1), { ...last, text: thinkingText }]
+          }
+          return [...current, { id: newId(), role: 'assistant', text: thinkingText, streaming: true }]
+        })
+        setSending(true)
+        setStatus('正在思考')
+        return
+      }
+
+      if (payload.kind === 'thinking_summary' && payload.text) {
+        setMessages((current) => [
+          ...current.filter((message) => !(message.kind === 'thinking' && message.streaming && isThinkingText(message.text))),
+          { id: payload.messageId || newId(), role: 'assistant', kind: 'thinking', text: payload.text || '' }
+        ])
+        setStatus(payload.text)
+        return
+      }
+
+      if (payload.kind === 'tool_start') {
+        setMessages((current) => [
+          ...current,
+          {
+            id: payload.messageId || newId(),
+            role: 'assistant',
+            kind: 'tool',
+            text: '',
+            toolName: payload.toolName || '已调用工具',
+            command: payload.command,
+            toolStatus: 'running'
+          }
+        ])
+        setStatus(`正在调用 ${payload.toolName || '工具'}`)
+        return
+      }
+
+      if (payload.kind === 'tool_result') {
+        setMessages((current) => {
+          const targetIndex = [...current].map((message, index) => ({ message, index }))
+            .reverse()
+            .find(({ message }) => message.kind === 'tool' && message.toolStatus === 'running')?.index
+          if (targetIndex === undefined) {
+            return [...current, {
+              id: payload.messageId || newId(), role: 'assistant', kind: 'tool', text: '',
+              toolName: payload.toolName || '工具', result: payload.result, card: payload.card ?? undefined, toolStatus: 'completed'
+            }]
+          }
+          return current.map((message, index) => index === targetIndex ? {
+            ...message,
+            toolName: payload.toolName || message.toolName,
+            result: payload.result || message.result,
+            card: payload.card ?? message.card,
+            toolStatus: 'completed'
+          } : message)
+        })
+        return
+      }
+
+      if (payload.kind === 'tool_delta' && payload.text) {
+        setMessages((current) => {
+          const targetIndex = [...current].map((message, index) => ({ message, index }))
+            .reverse()
+            .find(({ message }) => message.kind === 'tool')?.index
+          if (targetIndex === undefined) return current
+          return current.map((message, index) => index === targetIndex ? {
+            ...message,
+            result: mergeDelta(message.result || '', payload.text || ''),
+            toolStatus: 'completed'
+          } : message)
+        })
+        return
+      }
+
       if (payload.kind === 'delta' && payload.text) {
         setMessages((current) => {
           const last = current.at(-1)
           if (last?.role === 'assistant' && last.streaming) {
-            return [...current.slice(0, -1), { ...last, text: mergeDelta(last.text, payload.text ?? '') }]
+            const baseText = isThinkingText(last.text) ? '' : last.text
+            return [...current.slice(0, -1), { ...last, kind: 'text', text: mergeDelta(baseText, payload.text ?? '') }]
           }
-          return [...current, { id: newId(), role: 'assistant', text: payload.text ?? '', streaming: true }]
+          return [...current, { id: newId(), role: 'assistant', kind: 'text', text: payload.text ?? '', streaming: true }]
         })
         return
       }
@@ -323,16 +446,18 @@ export default function App() {
           // A turn can complete without a usable delta (for example when the
           // webpage only exposed a transient thinking state). Do not leave a
           // labelled but empty ChatGPT bubble in Flight.
-          .filter((message) => message.role !== 'assistant' || message.text.trim() || message.image))
+          .filter((message) => message.role !== 'assistant' || (message.text.trim() && !isThinkingText(message.text)) || message.image))
         setSending(false)
         setStatus('完成')
         return
       }
 
       if (payload.kind === 'error') {
-        setMessages((current) => current.map((message) => (
-          message.streaming ? { ...message, streaming: false, failed: true } : message
-        )))
+        setMessages((current) => current
+          .map((message) => (
+            message.streaming ? { ...message, streaming: false, failed: true } : message
+          ))
+          .filter((message) => message.role !== 'assistant' || !isThinkingText(message.text) || message.image))
         setSending(false)
         setStatus(payload.error || '网页端返回异常')
       }
@@ -620,12 +745,12 @@ export default function App() {
     setMessages((current) => [
       ...current,
       { id: newId(), role: 'user', text, image },
-      { id: newId(), role: 'assistant', text: '', streaming: true },
+      { id: newId(), role: 'assistant', kind: 'thinking', text: '正在思考…', streaming: true },
     ])
     setDraft('')
     setAttachment(undefined)
     setSending(true)
-    setStatus('已交给网页发送')
+    setStatus('正在思考…')
   }
 
   async function sendToWeb(text: string, image?: ImageAttachment) {
@@ -850,12 +975,14 @@ export default function App() {
                   )}
                 </div>
               ) : messages.map((message) => (
-                <article className={`message ${message.role} ${message.failed ? 'failed' : ''}`} key={message.id}>
-                  <span className="message-label">{message.role === 'user' ? '你' : 'ChatGPT'}</span>
+                <article className={`message ${message.role} ${message.kind ? `message-${message.kind}` : ''} ${message.failed ? 'failed' : ''}`} key={message.id}>
+                  <span className="message-label">{message.kind === 'thinking' ? '思考' : message.kind === 'tool' ? '工具' : message.role === 'user' ? '你' : 'ChatGPT'}</span>
                   <div className="message-content">
-                    {message.image && <img className="message-image" src={message.image.dataUrl} alt={message.image.name} />}
-                    {message.text ? <MarkdownContent value={message.text} /> : (message.streaming && <span className="typing" aria-label="正在生成"><i /><i /><i /></span>)}
-                    {message.streaming && message.text && <span className="cursor" aria-hidden="true" />}
+                    {message.kind === 'tool' ? <ToolMessage message={message} /> : <>
+                      {message.image && <img className="message-image" src={message.image.dataUrl} alt={message.image.name} />}
+                      {message.text ? <MarkdownContent value={message.text} /> : (message.streaming && <span className="typing" aria-label="正在生成"><i /><i /><i /></span>)}
+                      {message.streaming && message.text && <span className="cursor" aria-hidden="true" />}
+                    </>}
                   </div>
                 </article>
               ))}

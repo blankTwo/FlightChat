@@ -26,6 +26,11 @@ struct StreamEvent {
     title: Option<String>,
     error: Option<String>,
     messages: Option<Vec<HistoryMessage>>,
+    message_id: Option<String>,
+    tool_name: Option<String>,
+    command: Option<String>,
+    result: Option<String>,
+    card: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -120,7 +125,7 @@ fn import_cookies(app: AppHandle, cookies: Vec<ImportedCookie>) -> Result<usize,
                 Ok::<(), String>(())
             })();
             if let Err(error) = result {
-                let _ = event_app.emit_to("main", "flight://stream", StreamEvent { kind: "error".to_string(), text: None, conversation_id: None, title: None, error: Some(format!("Cookie 导入失败：{error}")), messages: None });
+                let _ = event_app.emit_to("main", "flight://stream", StreamEvent { kind: "error".to_string(), text: None, conversation_id: None, title: None, error: Some(format!("Cookie 导入失败：{error}")), messages: None, message_id: None, tool_name: None, command: None, result: None, card: None });
             }
         }).map_err(|error| error.to_string())?;
     }
@@ -261,6 +266,11 @@ fn enter_flight_mode(app: AppHandle, history_limit: Option<usize>) -> Result<(),
             title: None,
             error: None,
             messages: None,
+            message_id: None,
+            tool_name: None,
+            command: None,
+            result: None,
+            card: None,
         },
     )
     .map_err(|error| error.to_string())
@@ -542,12 +552,44 @@ const CHATGPT_BRIDGE_SCRIPT: &str = r#"
   // assistant reply until the stream has explicitly announced an assistant
   // message.
   let activeStreamAssistantStarted = false;
+  let activeToolMessageId = '';
 
   const emitPatch = (patch) => {
     if (!patch || typeof patch !== 'object') return;
+    if (activeToolMessageId && patch.p === '/message/content/text' && patch.o === 'append' && typeof patch.v === 'string') {
+      relay({ kind: 'tool_delta', messageId: activeToolMessageId, text: patch.v });
+      return;
+    }
     if (activeStreamAssistantStarted && patch.p === '/message/content/parts/0' && patch.o === 'append' && typeof patch.v === 'string') {
       window.__flightNetworkDeltaObserved = true;
       relay({ kind: 'delta', text: patch.v });
+    }
+  };
+
+  const toolNameFor = (message) => {
+    const sdk = message?.metadata?.chatgpt_sdk || {};
+    return sdk.resource_name || message?.author?.name || message?.recipient || '工具';
+  };
+
+  const toolCommandFor = (message) => {
+    const source = message?.content?.text;
+    if (typeof source !== 'string') return '';
+    try {
+      const parsed = JSON.parse(source);
+      return parsed?.args?.command || parsed?.command || '';
+    } catch (_) {
+      return '';
+    }
+  };
+
+  const toolResultFor = (message) => {
+    const source = message?.content?.text;
+    if (typeof source !== 'string') return '';
+    try {
+      const parsed = JSON.parse(source);
+      return typeof parsed?.result === 'string' ? parsed.result : source;
+    } catch (_) {
+      return source;
     }
   };
 
@@ -568,9 +610,40 @@ const CHATGPT_BRIDGE_SCRIPT: &str = r#"
     }
 
     const message = payload.v?.message;
-    if (message?.author?.role === 'assistant' && message.channel === 'final') {
-      activeStreamAssistantStarted = true;
-      relay({ kind: 'assistant_start', conversationId: payload.v?.conversation_id || payload.conversation_id });
+    if (message?.author?.role === 'assistant' && String(message.recipient || '').startsWith('api_tool.')) {
+      activeStreamAssistantStarted = false;
+      const reasoningTitle = String(message.metadata?.reasoning_title || '').trim();
+      if (reasoningTitle) {
+        relay({ kind: 'thinking_summary', text: reasoningTitle, messageId: message.id });
+      }
+      relay({ kind: 'tool_start', messageId: message.id, toolName: toolNameFor(message), command: toolCommandFor(message) });
+    }
+    if (message?.author?.role === 'tool') {
+      activeToolMessageId = message.id || activeToolMessageId;
+      const toolMetadata = message.metadata?.chatgpt_sdk?.tool_response_metadata?.tool || {};
+      relay({
+        kind: 'tool_result',
+        messageId: message.id,
+        toolName: toolMetadata?.card?.tool || toolMetadata?.tool || message.author?.name || '工具',
+        result: toolResultFor(message),
+        card: toolMetadata?.card || null
+      });
+    }
+    if (message?.author?.role === 'assistant' && message.content?.content_type === 'reasoning_recap') {
+      const summary = String(message.content?.content || '').trim();
+      if (summary) relay({ kind: 'thinking_summary', text: summary, messageId: message.id });
+    }
+    if (message?.author?.role === 'assistant') {
+      // Plus/Thinking streams can announce the visible answer on the
+      // `commentary` channel before switching to unlabelled append patches.
+      // Tool-call assistant messages use api_tool.* recipients and must not
+      // arm the text relay, otherwise their JSON/code payload leaks into the
+      // normal chat transcript.
+      const recipient = String(message.recipient || '');
+      activeStreamAssistantStarted = recipient === '' || recipient === 'all';
+      if (activeStreamAssistantStarted) {
+        relay({ kind: 'assistant_start', conversationId: payload.v?.conversation_id || payload.conversation_id });
+      }
     }
 
     if (eventName === 'delta') {
@@ -854,6 +927,18 @@ const CHATGPT_BRIDGE_SCRIPT: &str = r#"
     const compact = String(text || '').replace(/[\s.…]/g, '').toLowerCase();
     return /^(?:正在思考|思考中|正在思考中|thinking|thinkingfor\d+s?)$/.test(compact);
   };
+  const latestAssistantTransientText = () => {
+    for (const selector of assistantSelectors) {
+      const nodes = [...document.querySelectorAll(selector)]
+        .filter((node) => node.offsetParent !== null)
+        .filter((node) => !node.closest('[role="listbox"]') && !node.closest('[data-radix-popper-content]') && !node.closest('[role="dialog"]') && !node.closest('[role="menu"]'));
+      for (const node of nodes.reverse()) {
+        const text = node.innerText?.trim();
+        if (text && isTransientAssistantText(text)) return text;
+      }
+    }
+    return '';
+  };
   const latestAssistantText = () => {
     for (const selector of assistantSelectors) {
       const nodes = [...document.querySelectorAll(selector)]
@@ -1003,6 +1088,7 @@ const CHATGPT_BRIDGE_SCRIPT: &str = r#"
   };
 
   let latestDomText = latestAssistantText();
+  let latestThinkingText = '';
   let domCompleteTimer;
   let observedConversationId = /^\/c\/([^/?#]+)/.exec(location.pathname)?.[1] || '';
   let pageTrimTimer;
@@ -1056,6 +1142,15 @@ const CHATGPT_BRIDGE_SCRIPT: &str = r#"
     // after Flight itself has sent a turn, otherwise an old history reply is
     // appended to the restored transcript a second time.
     if (!window.__flightAwaitingReply || window.__flightNetworkDeltaObserved || Date.now() < (window.__flightDomFallbackNotBefore || 0)) return;
+    const thinking = latestAssistantTransientText();
+    if (thinking) {
+      if (thinking !== latestThinkingText) {
+        latestThinkingText = thinking;
+        relay({ kind: 'thinking', text: thinking });
+      }
+      return;
+    }
+    latestThinkingText = '';
     const next = latestAssistantText();
     if (!next || next === latestDomText) return;
     const delta = next.startsWith(latestDomText) ? next.slice(latestDomText.length) : next;
@@ -1496,7 +1591,14 @@ const CHATGPT_BRIDGE_SCRIPT: &str = r#"
     // bridge was injected. Arm the DOM fallback only for this newly sent turn.
     window.__flightAwaitingReply = true;
     window.__flightNetworkDeltaObserved = false;
+    activeStreamAssistantStarted = false;
     latestDomText = latestAssistantText();
+    latestThinkingText = '';
+    // Show an explicit transient state immediately after Flight submits a
+    // turn. Some Plus/WebSocket paths do not expose ChatGPT's temporary
+    // "thinking" DOM node to the bridge, so waiting for DOM inspection would
+    // leave the Flight transcript blank until the first real delta arrives.
+    relay({ kind: 'thinking', text: '正在思考' });
     window.__flightDomFallbackNotBefore = Date.now() + 1400;
     clearTimeout(window.__flightDomFallbackTimer);
     window.__flightDomFallbackTimer = setTimeout(inspectDomReply, 1450);
