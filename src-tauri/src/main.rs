@@ -850,15 +850,20 @@ const CHATGPT_BRIDGE_SCRIPT: &str = r#"
     '[data-testid*="message"] [data-message-author-role="assistant"]',
     '[data-message-author-role="assistant"]'
   ];
+  const isTransientAssistantText = (text) => {
+    const compact = String(text || '').replace(/[\s.…]/g, '').toLowerCase();
+    return /^(?:正在思考|思考中|正在思考中|thinking|thinkingfor\d+s?)$/.test(compact);
+  };
   const latestAssistantText = () => {
     for (const selector of assistantSelectors) {
       const nodes = [...document.querySelectorAll(selector)]
         .filter((node) => node.offsetParent !== null)
         // 排除 @ 和 / 候选浮层中的内容
         .filter((node) => !node.closest('[role="listbox"]') && !node.closest('[data-radix-popper-content]') && !node.closest('[role="dialog"]') && !node.closest('[role="menu"]'));
-      const last = nodes.at(-1);
-      const text = last?.innerText?.trim();
-      if (text) return text;
+      for (const node of nodes.reverse()) {
+        const text = node.innerText?.trim();
+        if (text && !isTransientAssistantText(text)) return text;
+      }
     }
     return '';
   };
@@ -880,7 +885,7 @@ const CHATGPT_BRIDGE_SCRIPT: &str = r#"
     // 排除 @ 和 / 候选浮层中的内容（不是真正的消息）
     .filter((node) => !node.closest('[role="listbox"]') && !node.closest('[data-radix-popper-content]') && !node.closest('[role="dialog"]') && !node.closest('[role="menu"]'))
     .map((node) => ({ role: node.getAttribute('data-message-author-role'), text: asMarkdownFromDom(node) }))
-    .filter((message) => message.text);
+    .filter((message) => message.text && (message.role !== 'assistant' || !isTransientAssistantText(message.text)));
 
   const conversationMessageNodes = () => [...document.querySelectorAll('[data-message-author-role="user"], [data-message-author-role="assistant"]')]
     .filter((node) => node.isConnected && !node.closest('#flight-page-trim'));
@@ -1009,10 +1014,11 @@ const CHATGPT_BRIDGE_SCRIPT: &str = r#"
       style.id = probeChromeStyleId;
       document.head?.appendChild(style);
     }
-    // Keep the newest assistant DOM available for Plus fallback, but remove
-    // its nonessential copy/share/retry controls from layout and paint.
+    // Keep assistant text nodes available for Plus fallback, but remove all
+    // native webpage controls from layout and paint in probe mode. Flight's
+    // injected controls are explicitly retained by their flight-* ids.
     style.textContent = window.__flightProbeMode
-      ? 'article[data-testid^="conversation-turn-"] button, article[data-testid^="conversation-turn-"] [role="button"] { display: none !important; }'
+      ? 'button:not([id^="flight-"]), [role="button"]:not([id^="flight-"]) { display: none !important; }'
       : '';
   };
   const schedulePageTrim = () => {
@@ -1046,14 +1052,20 @@ const CHATGPT_BRIDGE_SCRIPT: &str = r#"
   const inspectDomReply = () => {
     // Prefer intercepted network deltas. When the existing Plus WebSocket is
     // not observable from page JavaScript, fall back to this assistant-only DOM.
-    if (window.__flightNetworkDeltaObserved || Date.now() < (window.__flightDomFallbackNotBefore || 0)) return;
+    // History rendering also mutates this DOM. Only inspect it for a reply
+    // after Flight itself has sent a turn, otherwise an old history reply is
+    // appended to the restored transcript a second time.
+    if (!window.__flightAwaitingReply || window.__flightNetworkDeltaObserved || Date.now() < (window.__flightDomFallbackNotBefore || 0)) return;
     const next = latestAssistantText();
     if (!next || next === latestDomText) return;
     const delta = next.startsWith(latestDomText) ? next.slice(latestDomText.length) : next;
     latestDomText = next;
     if (delta) relay({ kind: 'delta', text: delta });
     clearTimeout(domCompleteTimer);
-    domCompleteTimer = setTimeout(() => relay({ kind: 'complete' }), 900);
+    domCompleteTimer = setTimeout(() => {
+      window.__flightAwaitingReply = false;
+      relay({ kind: 'complete' });
+    }, 900);
   };
   // 探针模式：只拦截流，不隐藏 DOM
   // 旧消息会自然留在网页上，但新消息不会渲染
@@ -1477,16 +1489,17 @@ const CHATGPT_BRIDGE_SCRIPT: &str = r#"
   };
 
   const send = async (text, image, preserveComposer = false) => {
+    const composer = await waitForComposer();
+    composer.focus();
+    if (image) await attachImage(composer, image);
     // A fetch wrapper can be bypassed if the site saved a reference before the
-    // bridge was injected. Reset the DOM fallback for every newly sent turn.
+    // bridge was injected. Arm the DOM fallback only for this newly sent turn.
+    window.__flightAwaitingReply = true;
     window.__flightNetworkDeltaObserved = false;
     latestDomText = latestAssistantText();
     window.__flightDomFallbackNotBefore = Date.now() + 1400;
     clearTimeout(window.__flightDomFallbackTimer);
     window.__flightDomFallbackTimer = setTimeout(inspectDomReply, 1450);
-    const composer = await waitForComposer();
-    composer.focus();
-    if (image) await attachImage(composer, image);
     if (preserveComposer && text) updateCommandSuffix(text);
     if (!preserveComposer && text && composer instanceof HTMLTextAreaElement) {
       const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
@@ -1515,6 +1528,7 @@ const CHATGPT_BRIDGE_SCRIPT: &str = r#"
       retryButton.click();
       return;
     }
+    window.__flightAwaitingReply = false;
     throw new Error('未找到可用的 ChatGPT 发送按钮');
   };
 

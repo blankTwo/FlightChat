@@ -279,7 +279,7 @@ export default function App() {
         }
         setSending(false)
         setConnected(true)
-        setStatus(history.length ? `已回显最新 ${history.length} 条历史消息` : '未读取到完整历史，保留当前已捕获内容')
+        setStatus(history.length ? `已回显最新 ${history.length} 条历史消息` : '历史消息正在从网页加载，稍后会显示在这里')
         return
       }
 
@@ -316,9 +316,14 @@ export default function App() {
       }
 
       if (payload.kind === 'complete') {
-        setMessages((current) => current.map((message) => (
-          message.streaming ? { ...message, streaming: false } : message
-        )))
+        setMessages((current) => current
+          .map((message) => (
+            message.streaming ? { ...message, streaming: false } : message
+          ))
+          // A turn can complete without a usable delta (for example when the
+          // webpage only exposed a transient thinking state). Do not leave a
+          // labelled but empty ChatGPT bubble in Flight.
+          .filter((message) => message.role !== 'assistant' || message.text.trim() || message.image))
         setSending(false)
         setStatus('完成')
         return
@@ -832,8 +837,17 @@ export default function App() {
               {messages.length === 0 ? (
                 <div className="empty-state">
                   <span className="empty-index">01</span>
-                  <h1>开始一段干净的对话。</h1>
-                  <p>内容会由已登录网页发送；这里仅保留轻量、实时的阅读界面。</p>
+                  {conversationId ? (
+                    <>
+                      <h1>正在同步这段对话。</h1>
+                      <p>历史消息正从已登录的网页读取；较长会话会分批显示，请稍候。</p>
+                    </>
+                  ) : (
+                    <>
+                      <h1>开始一段干净的对话。</h1>
+                      <p>内容会由已登录网页发送；这里仅保留轻量、实时的阅读界面。</p>
+                    </>
+                  )}
                 </div>
               ) : messages.map((message) => (
                 <article className={`message ${message.role} ${message.failed ? 'failed' : ''}`} key={message.id}>
