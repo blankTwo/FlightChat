@@ -19,9 +19,10 @@ type Message = {
 
 type ImageAttachment = { name: string, dataUrl: string }
 type ConversationSummary = { id: string, title: string, updatedAt?: number }
+type AccountSummary = { name: string, plan: string }
 
 type StreamEvent = {
-  kind: 'bridge_ready' | 'probe' | 'session_ready' | 'session_login_required' | 'enter_flight' | 'flight_active' | 'assistant_start' | 'conversation' | 'conversation_loading' | 'conversation_list' | 'conversation_list_error' | 'history' | 'command_suggestions' | 'delta' | 'complete' | 'title' | 'error'
+  kind: 'bridge_ready' | 'account' | 'probe' | 'session_ready' | 'session_login_required' | 'enter_flight' | 'flight_active' | 'assistant_start' | 'conversation' | 'conversation_loading' | 'conversation_list' | 'conversation_list_error' | 'history' | 'command_suggestions' | 'delta' | 'complete' | 'title' | 'error'
   text?: string
   conversationId?: string
   title?: string
@@ -126,6 +127,9 @@ export default function App() {
   const [historyDrawerOpen, setHistoryDrawerOpen] = useState(false)
   const [historyQuery, setHistoryQuery] = useState('')
   const [historyLoading, setHistoryLoading] = useState(false)
+  const [historyError, setHistoryError] = useState<string>()
+  const [account, setAccount] = useState<AccountSummary>()
+  const [accountError, setAccountError] = useState<string>()
   const [conversationSwitching, setConversationSwitching] = useState(false)
   const transcriptRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -181,6 +185,21 @@ export default function App() {
         return
       }
 
+      if (payload.kind === 'account') {
+        try {
+          const next = JSON.parse(payload.text ?? '{}')
+          if (typeof next?.name === 'string' && typeof next?.plan === 'string' && next.name && next.plan) {
+            setAccount({ name: next.name, plan: next.plan })
+            setAccountError(undefined)
+          } else if (typeof next?.error === 'string') {
+            setAccountError(next.error)
+          }
+        } catch {
+          setAccountError('网页返回格式异常')
+        }
+        return
+      }
+
       if (payload.kind === 'session_ready') {
         setConnected(true)
         if (!autoEnterRef.current) {
@@ -227,12 +246,15 @@ export default function App() {
       if (payload.kind === 'conversation_list') {
         try {
           const list = JSON.parse(payload.text ?? '[]')
-          setConversationList(Array.isArray(list) ? list.filter((item): item is ConversationSummary => (
+          const conversations = Array.isArray(list) ? list.filter((item): item is ConversationSummary => (
             typeof item?.id === 'string' && typeof item?.title === 'string'
-          )) : [])
+          )) : []
+          setConversationList(conversations)
+          setHistoryError(undefined)
           setHistoryLoading(false)
         } catch {
           setConversationList([])
+          setHistoryError('历史会话列表数据格式异常')
           setHistoryLoading(false)
         }
         return
@@ -240,7 +262,7 @@ export default function App() {
 
       if (payload.kind === 'conversation_list_error') {
         setHistoryLoading(false)
-        setStatus(payload.error || '无法读取历史会话列表')
+        setHistoryError(payload.error || '无法读取历史会话列表')
         return
       }
 
@@ -365,7 +387,6 @@ export default function App() {
           minHeight: 520,
           center: true,
         })
-
         await new Promise<void>((resolve, reject) => {
           void chatWindow.once('tauri://created', () => resolve())
           void chatWindow.once('tauri://error', (event) => reject(event.payload))
@@ -535,11 +556,12 @@ export default function App() {
 
   async function refreshConversationList() {
     setHistoryLoading(true)
+    setHistoryError(undefined)
     try {
       await invoke('load_conversation_list')
     } catch (error) {
       setHistoryLoading(false)
-      setStatus(`无法读取历史会话列表：${String(error)}`)
+      setHistoryError(`无法读取历史会话列表：${String(error)}`)
     }
   }
 
@@ -714,6 +736,7 @@ export default function App() {
           </div>
           <span className="topbar-status">{sending ? '正在接收网页回复' : status}</span>
           <span className={`connection ${connected ? 'is-live' : ''}`}><i />{connected ? '网页通道在线' : '未连接'}</span>
+          {connected && <span className={`account-summary ${accountError ? 'has-error' : ''}`} title={account ? `${account.name} · ${account.plan}` : accountError}>{account ? `${account.name} · ${account.plan}` : accountError || '正在读取账户…'}</span>}
         </div>
         <div className="topbar-center">
           <span className="eyebrow">当前会话</span>
@@ -727,7 +750,9 @@ export default function App() {
               <button className={`button quiet ${historyDrawerOpen ? 'is-active' : ''}`} onClick={() => void openConversationList()}>会话列表</button>
             </>
           ) : (
-            <button className="button quiet" onClick={() => void openLogin()}>打开登录页</button>
+            <>
+              <button className="button quiet" onClick={() => void openLogin()}>打开登录页</button>
+            </>
           )}
         </div>
       </header>
@@ -797,7 +822,8 @@ export default function App() {
                 {conversationList.filter((item) => item.title.toLowerCase().includes(historyQuery.trim().toLowerCase())).map((item) => (
                   <button type="button" key={item.id} className={item.id === conversationId ? 'is-current' : ''} onClick={() => void selectConversation(item)} disabled={conversationSwitching} title={item.title}>{item.title}</button>
                 ))}
-                {!historyLoading && conversationList.length === 0 && <p>没有可用的历史会话。</p>}
+                {!historyLoading && conversationList.length === 0 && historyError && <p>{historyError}</p>}
+                {!historyLoading && conversationList.length === 0 && !historyError && <p>没有可用的历史会话。</p>}
               </div>
               <button className="drawer-refresh" type="button" onClick={() => void refreshConversationList()} disabled={historyLoading}>刷新列表</button>
             </aside>

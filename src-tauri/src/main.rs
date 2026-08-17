@@ -518,6 +518,7 @@ const CHATGPT_BRIDGE_SCRIPT: &str = r#"
     window.__flightChat.installProbeModeButton?.();
     window.__flightChat.installCookieImportButton?.();
     window.__flightChat.installCookieExportButton?.();
+    window.__flightChat.reportAccountSummary?.();
     const existingButton = document.getElementById('flight-enter-mode');
     if (existingButton) { existingButton.disabled = false; existingButton.textContent = '进入飞行模式'; }
     return;
@@ -536,10 +537,15 @@ const CHATGPT_BRIDGE_SCRIPT: &str = r#"
   };
 
   const splitSseBlocks = (source) => source.replace(/\r\n/g, '\n').split('\n\n');
+  // A delta frame alone has no author field. Some account/model variants emit
+  // user-side echo frames on the same stream, so do not treat a delta as an
+  // assistant reply until the stream has explicitly announced an assistant
+  // message.
+  let activeStreamAssistantStarted = false;
 
   const emitPatch = (patch) => {
     if (!patch || typeof patch !== 'object') return;
-    if (patch.p === '/message/content/parts/0' && patch.o === 'append' && typeof patch.v === 'string') {
+    if (activeStreamAssistantStarted && patch.p === '/message/content/parts/0' && patch.o === 'append' && typeof patch.v === 'string') {
       window.__flightNetworkDeltaObserved = true;
       relay({ kind: 'delta', text: patch.v });
     }
@@ -563,11 +569,12 @@ const CHATGPT_BRIDGE_SCRIPT: &str = r#"
 
     const message = payload.v?.message;
     if (message?.author?.role === 'assistant' && message.channel === 'final') {
+      activeStreamAssistantStarted = true;
       relay({ kind: 'assistant_start', conversationId: payload.v?.conversation_id || payload.conversation_id });
     }
 
     if (eventName === 'delta') {
-      if (typeof payload.v === 'string') {
+      if (activeStreamAssistantStarted && typeof payload.v === 'string') {
         window.__flightNetworkDeltaObserved = true;
         relay({ kind: 'delta', text: payload.v });
       }
@@ -612,6 +619,64 @@ const CHATGPT_BRIDGE_SCRIPT: &str = r#"
     }
   };
 
+  // Plus subscriptions deliver the same SSE records through a WebSocket. Each
+  // topic message wraps the record in payload.payload.encoded_item, including
+  // recovered catchup records after subscribe. Decode that envelope and feed
+  // the existing SSE parser instead of maintaining two reply parsers.
+  const observedWebSocketItems = new Set();
+  const rememberWebSocketItem = (id) => {
+    if (!id || observedWebSocketItems.has(id)) return false;
+    observedWebSocketItems.add(id);
+    while (observedWebSocketItems.size > 512) observedWebSocketItems.delete(observedWebSocketItems.values().next().value);
+    return true;
+  };
+
+  const consumeConversationTopicMessage = (entry) => {
+    const stream = entry?.payload?.type === 'conversation-turn-stream' ? entry.payload.payload : null;
+    if (!stream || typeof stream.encoded_item !== 'string' || !rememberWebSocketItem(stream.stream_item_id)) return;
+    console.debug('[Flight WS] conversation stream item', stream.encoded_item.slice(0, 600));
+    const blocks = splitSseBlocks(stream.encoded_item);
+    blocks.forEach(handleBlock);
+  };
+
+  const consumeConversationTopicEnvelope = (entry) => {
+    if (Array.isArray(entry)) {
+      entry.forEach(consumeConversationTopicEnvelope);
+      return;
+    }
+    if (!entry || typeof entry !== 'object') return;
+    consumeConversationTopicMessage(entry);
+    if (Array.isArray(entry.reply?.catchups)) entry.reply.catchups.forEach(consumeConversationTopicEnvelope);
+  };
+
+  const asWebSocketText = async (data) => {
+    if (typeof data === 'string') return data;
+    if (data instanceof Blob) return data.text();
+    if (data instanceof ArrayBuffer) return new TextDecoder().decode(data);
+    if (ArrayBuffer.isView(data)) return new TextDecoder().decode(data);
+    return '';
+  };
+
+  const inspectWebSocketFrame = async (data) => {
+    try {
+      const text = await asWebSocketText(data);
+      if (!text) return;
+      consumeConversationTopicEnvelope(JSON.parse(text));
+    } catch (_) {
+      // Other ChatGPT WebSocket topics are unrelated to conversation output.
+    }
+  };
+
+  const NativeWebSocket = window.WebSocket;
+  const FlightWebSocket = function (...args) {
+    const socket = new NativeWebSocket(...args);
+    socket.addEventListener('message', (event) => { void inspectWebSocketFrame(event.data); });
+    return socket;
+  };
+  FlightWebSocket.prototype = NativeWebSocket.prototype;
+  Object.setPrototypeOf(FlightWebSocket, NativeWebSocket);
+  window.WebSocket = FlightWebSocket;
+
   const nativeFetch = window.fetch.bind(window);
   // The site already requests the full conversation when a history item is
   // opened. Keep only its newest useful turns for Flight instead of issuing a
@@ -652,6 +717,45 @@ const CHATGPT_BRIDGE_SCRIPT: &str = r#"
   const savedProbeMode = sessionStorage.getItem('__flightProbeMode');
   window.__flightProbeMode = savedProbeMode !== null ? savedProbeMode === 'true' : true;
 
+  // The profile control is present in the persistent sidebar for both account
+  // types. Do not use names or avatar URLs: only the plan text is relevant.
+  const accountPlan = () => {
+    const profileText = [...document.querySelectorAll('[data-testid="accounts-profile-button"]')]
+      .map((node) => `${node.getAttribute('aria-label') || ''} ${node.innerText || ''}`)
+      .join(' ')
+      .toLowerCase();
+    if (/(?:\bplus\b|\bpro\b|\bteam\b|\bbusiness\b|\benterprise\b|专业版|团队版|企业版)/i.test(profileText)) return 'paid';
+    if (/(?:\bfree\b|免费版)/i.test(profileText)) return 'free';
+    return 'unknown';
+  };
+
+  const reportAccountSummary = () => {
+    const profiles = [...document.querySelectorAll('[data-testid="accounts-profile-button"]')];
+    if (!profiles.length) {
+      relay({ kind: 'account', text: JSON.stringify({ error: '未找到个人资料按钮' }) });
+      return false;
+    }
+    for (const profile of profiles) {
+      const label = profile.getAttribute('aria-label') || '';
+      const lines = (profile.innerText || '').split(/\n+/).map((line) => line.trim()).filter(Boolean);
+      const planPattern = /^(?:ChatGPT )?(?:Plus|Pro|Team|Business|Enterprise|Free|Go|免费版|专业版|团队版|企业版)$/i;
+      const planIndex = lines.findIndex((line) => planPattern.test(line));
+      const plan = planIndex >= 0 ? lines[planIndex] : '';
+      const name = planIndex > 0 ? lines[planIndex - 1] : '';
+      const identity = label.split(/[，,]/)[0].trim();
+      const labelPlanMatch = identity.match(/(?:Plus|Pro|Team|Business|Enterprise|Free|Go|免费版|专业版|团队版|企业版)/i);
+      const fallbackPlan = labelPlanMatch?.[0] || '';
+      const fallbackName = fallbackPlan ? identity.slice(0, labelPlanMatch.index).trim() : identity;
+      const resolvedName = name || fallbackName;
+      const resolvedPlan = plan || fallbackPlan;
+      if (!resolvedName || !resolvedPlan) continue;
+      relay({ kind: 'account', text: JSON.stringify({ name: resolvedName.slice(0, 80), plan: resolvedPlan }) });
+      return true;
+    }
+    relay({ kind: 'account', text: JSON.stringify({ error: '个人资料中未识别用户名或套餐' }) });
+    return false;
+  };
+
   window.fetch = async (...args) => {
     const response = await nativeFetch(...args);
     const input = args[0];
@@ -665,11 +769,26 @@ const CHATGPT_BRIDGE_SCRIPT: &str = r#"
     }
     if (isConversationList && response.ok) cacheConversationListResponse(response.clone());
     if (isFastConversationStream || isResumeStream) {
+      activeStreamAssistantStarted = false;
       relay({ kind: 'probe', text: `已捕获回复流：${isResumeStream ? 'conversation/resume' : 'f/conversation'}` });
+      const plan = accountPlan();
 
-      // 探针模式：手动 tee 流，一份给 Flight，一份给网页（空）
+      // Plus 的 resume 流只负责 WebSocket handoff。必须让网页继续消费
+      // 原始响应，否则不会订阅共享 WebSocket，也就没有可退回的 assistant DOM。
+      if (window.__flightProbeMode && plan !== 'free') {
+        relay({ kind: 'probe', text: `探针模式：${plan === 'paid' ? '付费账号' : '账号类型未识别'}，保留网页流` });
+
+        if (!response.body) {
+          relay({ kind: 'error', error: '响应流为空' });
+          return response;
+        }
+        void observeResponse(response.clone());
+        return response;
+      }
+
+      // Free accounts send their assistant content through this HTTP stream,
+      // so probe mode can still consume it without allowing page rendering.
       if (window.__flightProbeMode) {
-        relay({ kind: 'probe', text: '探针模式：拦截流到 Flight' });
 
         if (!response.body) {
           relay({ kind: 'error', error: '响应流为空' });
@@ -723,12 +842,13 @@ const CHATGPT_BRIDGE_SCRIPT: &str = r#"
     return response;
   };
 
+  // DOM fallback must only ever read an explicit assistant node. Broad turn
+  // selectors also match the user's turn. This fallback is needed when a Plus
+  // account's shared WebSocket was opened before the bridge was injected.
   const assistantSelectors = [
-    '[data-message-author-role="assistant"]',
     'article[data-testid^="conversation-turn-"] [data-message-author-role="assistant"]',
-    'article[data-testid^="conversation-turn-"]',
-    '[data-testid*="conversation-turn"]',
-    '[data-testid*="message"] [data-message-author-role="assistant"]'
+    '[data-testid*="message"] [data-message-author-role="assistant"]',
+    '[data-message-author-role="assistant"]'
   ];
   const latestAssistantText = () => {
     for (const selector of assistantSelectors) {
@@ -765,6 +885,8 @@ const CHATGPT_BRIDGE_SCRIPT: &str = r#"
   const conversationMessageNodes = () => [...document.querySelectorAll('[data-message-author-role="user"], [data-message-author-role="assistant"]')]
     .filter((node) => node.isConnected && !node.closest('#flight-page-trim'));
 
+  const conversationTurnRoot = (node) => node.closest('article[data-testid^="conversation-turn-"]') || node;
+
   // The app has already obtained the complete history through the API. Remove
   // older rendered turns from the webpage itself so its layout/paint work does
   // not keep growing for a long conversation. We deliberately remove only the
@@ -773,8 +895,12 @@ const CHATGPT_BRIDGE_SCRIPT: &str = r#"
     const safeKeep = Math.min(Math.max(Number(keep) || 2, 1), 20);
     const nodes = conversationMessageNodes();
     const staleNodes = nodes.slice(0, Math.max(0, nodes.length - safeKeep));
-    for (const node of staleNodes) node.remove();
-    return staleNodes.length;
+    // A message's action toolbar is a sibling of data-message-author-role in
+    // ChatGPT's turn article. Removing only the content leaves the toolbar as
+    // an empty, still-laid-out DOM island. Remove that stale turn root instead.
+    const staleRoots = [...new Set(staleNodes.map(conversationTurnRoot))];
+    for (const root of staleRoots) root.remove();
+    return staleRoots.length;
   };
 
   const historyFromApi = (conversation) => Object.values(conversation?.mapping || {})
@@ -875,6 +1001,20 @@ const CHATGPT_BRIDGE_SCRIPT: &str = r#"
   let domCompleteTimer;
   let observedConversationId = /^\/c\/([^/?#]+)/.exec(location.pathname)?.[1] || '';
   let pageTrimTimer;
+  const probeChromeStyleId = 'flight-probe-conversation-chrome';
+  const syncProbeConversationChrome = () => {
+    let style = document.getElementById(probeChromeStyleId);
+    if (!style) {
+      style = document.createElement('style');
+      style.id = probeChromeStyleId;
+      document.head?.appendChild(style);
+    }
+    // Keep the newest assistant DOM available for Plus fallback, but remove
+    // its nonessential copy/share/retry controls from layout and paint.
+    style.textContent = window.__flightProbeMode
+      ? 'article[data-testid^="conversation-turn-"] button, article[data-testid^="conversation-turn-"] [role="button"] { display: none !important; }'
+      : '';
+  };
   const schedulePageTrim = () => {
     const conversationId = /^\/c\/([^/?#]+)/.exec(location.pathname)?.[1] || '';
     if (!conversationId) return;
@@ -904,6 +1044,8 @@ const CHATGPT_BRIDGE_SCRIPT: &str = r#"
   }, 250);
 
   const inspectDomReply = () => {
+    // Prefer intercepted network deltas. When the existing Plus WebSocket is
+    // not observable from page JavaScript, fall back to this assistant-only DOM.
     if (window.__flightNetworkDeltaObserved || Date.now() < (window.__flightDomFallbackNotBefore || 0)) return;
     const next = latestAssistantText();
     if (!next || next === latestDomText) return;
@@ -1001,7 +1143,7 @@ const CHATGPT_BRIDGE_SCRIPT: &str = r#"
     const updateButtonState = () => {
       if (window.__flightProbeMode) {
         button.textContent = '✓ 探针模式';
-        button.title = '当前：探针模式（网页不渲染消息）\n点击切换为标准模式';
+        button.title = '当前：探针模式（优先读取网络流，缺失时回退网页消息）\n点击切换为标准模式';
         button.style.background = '#34723e';
         button.style.color = '#fffaf3';
       } else {
@@ -1017,11 +1159,13 @@ const CHATGPT_BRIDGE_SCRIPT: &str = r#"
       font: '600 13px system-ui, sans-serif', transition: 'all 0.2s'
     });
     updateButtonState();
+    syncProbeConversationChrome();
     button.addEventListener('click', () => {
       window.__flightProbeMode = !window.__flightProbeMode;
       // 保存状态到 sessionStorage（刷新后保持）
       sessionStorage.setItem('__flightProbeMode', String(window.__flightProbeMode));
       updateButtonState();
+      syncProbeConversationChrome();
       relay({ kind: 'probe', text: `探针模式已${window.__flightProbeMode ? '启用' : '禁用'}` });
       // 探针模式切换不再需要恢复 DOM（因为我们不隐藏了）
     });
@@ -1374,7 +1518,7 @@ const CHATGPT_BRIDGE_SCRIPT: &str = r#"
     throw new Error('未找到可用的 ChatGPT 发送按钮');
   };
 
-  window.__flightChat = { send, loadHistory, loadConversationList, openConversation, updateCommandDraft, selectCommandOption, updateCommandSuffix, clearCommandSelection, installFlightModeButton, installPageTrimButton, installProbeModeButton, installCookieImportButton, installCookieExportButton, completeCookieExport, failCookieExport };
+  window.__flightChat = { send, loadHistory, loadConversationList, openConversation, updateCommandDraft, selectCommandOption, updateCommandSuffix, clearCommandSelection, installFlightModeButton, installPageTrimButton, installProbeModeButton, installCookieImportButton, installCookieExportButton, reportAccountSummary, completeCookieExport, failCookieExport };
   installFlightModeButton();
   installPageTrimButton();
   installProbeModeButton();
@@ -1382,6 +1526,13 @@ const CHATGPT_BRIDGE_SCRIPT: &str = r#"
   installCookieExportButton();
   const currentConversationId = /^\/c\/([^/?#]+)/.exec(location.pathname)?.[1];
   relay({ kind: 'bridge_ready', conversationId: currentConversationId });
+  if (!reportAccountSummary()) {
+    let remainingAccountAttempts = 20;
+    const accountTimer = setInterval(() => {
+      remainingAccountAttempts -= 1;
+      if (reportAccountSummary() || remainingAccountAttempts <= 0) clearInterval(accountTimer);
+    }, 500);
+  }
   if (currentConversationId) {
     // The page's own detail request may have happened before the bridge was
     // injected. Read the rendered latest turns again as the hidden route

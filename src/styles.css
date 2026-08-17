@@ -25,6 +25,8 @@ button:disabled { cursor: not-allowed; }
 .connection { display: inline-flex; align-items: center; gap: 7px; color: oklch(52% .02 62); font-size: 12px; }
 .connection i { width: 7px; height: 7px; border-radius: 99px; background: oklch(65% .015 72); }
 .connection.is-live i { background: oklch(54% .11 146); box-shadow: 0 0 0 3px oklch(54% .11 146 / .12); }
+.account-summary { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: oklch(44% .025 62); font-size: 12px; font-weight: 600; }
+.account-summary.has-error { color: oklch(52% .07 28); font-weight: 500; }
 .button { min-height: 36px; border: 0; padding: 0 14px; border-radius: 8px; transition: background .2s ease, color .2s ease, transform .2s ease; }
 .button:hover { transform: translateY(-1px); }
 .button.primary { background: oklch(31% .04 57); color: oklch(97% .015 80); padding: 0 20px; border-radius: 10px; }
