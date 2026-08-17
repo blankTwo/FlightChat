@@ -225,7 +225,7 @@ export default function App() {
         setMode('flight')
         setPickingHistory(false)
         setConnected(true)
-        setStatus('飞行模式已连接网页通道')
+        setStatus('已连接')
         return
       }
 
@@ -300,7 +300,7 @@ export default function App() {
 
       if (payload.kind === 'assistant_start') {
         setConnected(true)
-        setStatus('正在生成')
+        setStatus('生成中')
         return
       }
 
@@ -320,7 +320,7 @@ export default function App() {
           message.streaming ? { ...message, streaming: false } : message
         )))
         setSending(false)
-        setStatus('已完成')
+        setStatus('完成')
         return
       }
 
@@ -492,7 +492,7 @@ export default function App() {
       setMode('flight')
       setPickingHistory(false)
       setConnected(true)
-      setStatus('飞行模式已连接网页通道')
+      setStatus('已连接')
     } catch (error) {
       setStatus(`请先完成网页登录：${String(error)}`)
     }
@@ -701,10 +701,10 @@ export default function App() {
     // Reflect a close immediately. The native hide of a busy ChatGPT WebView
     // is deliberately allowed to finish in the background.
     setSplitView(enabled)
-    setStatus(enabled ? '正在开启分屏预览…' : '正在收起网页，返回飞行模式…')
+      setStatus(enabled ? '开启分屏…' : '返回飞行…')
     try {
       await invoke('set_split_view', { enabled, width: splitWidth })
-      setStatus(enabled ? '分屏预览已开启：左侧 Flight，右侧网页' : '已返回飞行模式')
+      setStatus(enabled ? '分屏已开启' : '已返回')
     } catch (error) {
       setSplitView(previous)
       setStatus(`无法切换分屏：${String(error)}`)
@@ -734,9 +734,9 @@ export default function App() {
             <span className="wordmark-mark">F</span>
             <span>Flight</span>
           </div>
-          <span className="topbar-status">{sending ? '正在接收网页回复' : status}</span>
-          <span className={`connection ${connected ? 'is-live' : ''}`}><i />{connected ? '网页通道在线' : '未连接'}</span>
-          {connected && <span className={`account-summary ${accountError ? 'has-error' : ''}`} title={account ? `${account.name} · ${account.plan}` : accountError}>{account ? `${account.name} · ${account.plan}` : accountError || '正在读取账户…'}</span>}
+          <span className="topbar-status" title={sending ? '正在接收网页回复' : status}>{sending ? '回复中' : status}</span>
+          <span className={`connection ${connected ? 'is-live' : ''}`}><i />{connected ? '在线' : '离线'}</span>
+          {connected && <span className={`account-summary ${accountError ? 'has-error' : ''}`} title={account ? `${account.name} · ${account.plan}` : accountError}>{account ? `${account.name} · ${account.plan}` : accountError ? '账户未识别' : '读取账户…'}</span>}
         </div>
         <div className="topbar-center">
           <span className="eyebrow">当前会话</span>
@@ -804,9 +804,8 @@ export default function App() {
                   ))}
                 </div>
                 <div className="setting-action">
-                  <button className="button quiet" onClick={() => void restartApp()}>重启应用生效</button>
+                  <button className="button quiet" onClick={() => void restartApp()}>应用</button>
                 </div>
-                <p className="setting-hint">修改窗口大小后需要重启应用才能生效</p>
               </div>
             </div>
           </div>

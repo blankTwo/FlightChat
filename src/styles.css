@@ -22,7 +22,7 @@ button:disabled { cursor: not-allowed; }
 .topbar-actions { justify-self: end; display: flex; align-items: center; gap: 18px; flex-wrap: wrap; min-width: 0; }
 .topbar-status { color: oklch(50% .02 62); font-size: 12px; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .eyebrow { margin: 0; text-transform: uppercase; letter-spacing: .15em; font-size: 10px; font-weight: 700; color: oklch(47% .025 63); }
-.connection { display: inline-flex; align-items: center; gap: 7px; color: oklch(52% .02 62); font-size: 12px; }
+.connection { display: inline-flex; align-items: center; gap: 7px; color: oklch(52% .02 62); font-size: 12px; white-space: nowrap; }
 .connection i { width: 7px; height: 7px; border-radius: 99px; background: oklch(65% .015 72); }
 .connection.is-live i { background: oklch(54% .11 146); box-shadow: 0 0 0 3px oklch(54% .11 146 / .12); }
 .account-summary { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: oklch(44% .025 62); font-size: 12px; font-weight: 600; }
