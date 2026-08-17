@@ -2,6 +2,8 @@
 
 一个基于 Tauri 的 ChatGPT 桌面客户端，提供探针模式实现无干扰对话体验。
 
+![Flight Chat 产品预览](assets/flight-chat-overview.png)
+
 ## ✨ 核心功能
 
 ### 🎯 探针模式
